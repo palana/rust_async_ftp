@@ -64,3 +64,6 @@ pub use self::ftp::FtpStream;
 pub use self::types::FtpError;
 #[cfg(feature = "progress")]
 pub use self::ftp::ProgressConfig;
+
+#[cfg(feature = "secure")]
+pub use self::ftp::TLS_BUFFER_SIZE;

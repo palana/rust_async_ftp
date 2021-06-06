@@ -16,7 +16,7 @@ use tokio::io::{
 use tokio::net::{TcpStream, ToSocketAddrs};
 
 #[cfg(feature = "secure")]
-use tokio_rustls::{rustls::ClientConfig, webpki::DNSName, TlsConnector};
+use tokio_rustls::{rustls::{ClientConfig, Session}, webpki::DNSName, TlsConnector};
 
 #[cfg(feature = "progress")]
 use async_read_progress::TokioAsyncWriteProgressExt as _;
@@ -36,6 +36,10 @@ lazy_static::lazy_static! {
     // This regex extracts file size from SIZE command response.
     static ref SIZE_RE: Regex = Regex::new(r"\s+(\d+)\s*$").unwrap();
 }
+
+#[cfg(feature = "secure")]
+/// See https://github.com/ctz/rustls/pull/714
+pub const TLS_BUFFER_SIZE: usize = 64 * 1024;
 
 /// Helper struct to pass in config for [`async_read_progress::TokioAsyncReadProgressExt`]
 /// and [`async_read_progress::TokioAsyncWriteProgressExt`]
@@ -181,7 +185,10 @@ impl FtpStream {
                 return connector
                     .connect(domain.as_ref(), stream)
                     .await
-                    .map(|stream| DataStream::Ssl(stream))
+                    .map(|mut stream| {
+                        stream.get_mut().1.set_buffer_limit(TLS_BUFFER_SIZE);
+                        DataStream::Ssl(stream)
+                    })
                     .map_err(|e| FtpError::SecureError(format!("{}", e)));
             }
             _ => {}
