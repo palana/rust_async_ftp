@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::string::String;
+use std::time::Duration;
 
 use chrono::offset::TimeZone;
 use chrono::{DateTime, Utc};
@@ -16,6 +17,9 @@ use tokio::net::{TcpStream, ToSocketAddrs};
 
 #[cfg(feature = "secure")]
 use tokio_rustls::{rustls::ClientConfig, webpki::DNSName, TlsConnector};
+
+#[cfg(feature = "progress")]
+use async_read_progress::TokioAsyncWriteProgressExt as _;
 
 use crate::data_stream::DataStream;
 use crate::status;
@@ -31,6 +35,23 @@ lazy_static::lazy_static! {
 
     // This regex extracts file size from SIZE command response.
     static ref SIZE_RE: Regex = Regex::new(r"\s+(\d+)\s*$").unwrap();
+}
+
+/// Helper struct to pass in config for [`async_read_progress::TokioAsyncReadProgressExt`]
+/// and [`async_read_progress::TokioAsyncWriteProgressExt`]
+pub struct ProgressConfig<F> {
+    pub at_most_ever: Duration,
+    pub callback: F,
+}
+
+#[cfg(feature = "progress")]
+impl<F: FnMut(usize) + Unpin> ProgressConfig<F> {
+    pub fn new(at_most_ever: Duration, callback: F) -> Self {
+        ProgressConfig {
+            at_most_ever,
+            callback,
+        }
+    }
 }
 
 /// Stream to interface with the FTP server. This interface is only for the command stream.
@@ -412,9 +433,8 @@ impl FtpStream {
         Ok(())
     }
 
-    async fn put_file<R: AsyncRead + Unpin>(&mut self, filename: &str, r: &mut R) -> Result<()> {
-        let stor_command = format!("STOR {}\r\n", filename);
-        let mut data_stream = BufWriter::new(self.data_command(&stor_command).await?);
+    async fn put_file_work<R: AsyncRead + Unpin, W: AsyncWriteExt + Unpin>(&mut self, r: &mut R, data_channel: W) -> Result<()> {
+        let mut data_stream = BufWriter::new(data_channel);
         self.read_response_in(&[status::ALREADY_OPEN, status::ABOUT_TO_SEND])
             .await?;
         copy(r, &mut data_stream)
@@ -423,9 +443,37 @@ impl FtpStream {
         Ok(())
     }
 
+    async fn put_file<R: AsyncRead + Unpin, F: FnMut(usize) + Unpin>(&mut self, filename: &str, r: &mut R, progress_config: Option<ProgressConfig<F>>) -> Result<()> {
+        let stor_command = format!("STOR {}\r\n", filename);
+        let data_channel = self.data_command(&stor_command).await?;
+        match progress_config {
+            #[cfg(feature = "progress")]
+            Some(progress_config) => {
+                let progress_channel = data_channel.report_progress(
+                    progress_config.at_most_ever,
+                    progress_config.callback
+                );
+                self.put_file_work(r, progress_channel).await
+            }
+            _ => self.put_file_work(r, data_channel).await
+        }
+    }
+
     /// This stores a file on the server.
     pub async fn put<R: AsyncRead + Unpin>(&mut self, filename: &str, r: &mut R) -> Result<()> {
-        self.put_file(filename, r).await?;
+        self.put_file(filename, r, None::<ProgressConfig<fn(_)>>).await?;
+        self.read_response_in(&[
+            status::CLOSING_DATA_CONNECTION,
+            status::REQUESTED_FILE_ACTION_OK,
+        ])
+        .await?;
+        Ok(())
+    }
+
+    /// This stores a file on the server, and reports upload progress through the callback.
+    #[cfg(feature = "progress")]
+    pub async fn put_with_progress<R: AsyncRead + Unpin, F: FnMut(usize) + Unpin>(&mut self, filename: &str, r: &mut R, progress_config: ProgressConfig<F>) -> Result<()> {
+        self.put_file(filename, r, Some(progress_config)).await?;
         self.read_response_in(&[
             status::CLOSING_DATA_CONNECTION,
             status::REQUESTED_FILE_ACTION_OK,

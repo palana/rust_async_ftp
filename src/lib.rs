@@ -62,3 +62,5 @@ pub mod types;
 pub use self::data_stream::DataStream;
 pub use self::ftp::FtpStream;
 pub use self::types::FtpError;
+#[cfg(feature = "progress")]
+pub use self::ftp::ProgressConfig;
